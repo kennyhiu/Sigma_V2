@@ -223,31 +223,48 @@ class SigmaAPI:
         except Exception as exc:
             print(exc)
             return None
+
+    def get_all_version_tags(self):
+        url = f"{self.base_url.rstrip('/')}/v2/tags"
+        headers = self.get_headers()
+        try:
+            tags = paginate(url, headers)
+            normalized = []
+            for tag in tags:
+                if not isinstance(tag, dict):
+                    continue
+                tag_id = tag.get("versionTagId") or tag.get("tagId") or tag.get("id")
+                if not tag_id:
+                    continue
+                normalized.append(
+                    {
+                        "id": str(tag_id),
+                        "name": tag.get("name"),
+                    }
+                )
+            return normalized
+        except Exception as exc:
+            print(exc)
+            return None
     
     def get_tag_name(self, tag_id):
         if not tag_id:
             return None
-        if tag_id in self._tag_name_by_id:
-            return self._tag_name_by_id.get(tag_id)
+        normalized_tag_id = str(tag_id)
+        if normalized_tag_id in self._tag_name_by_id:
+            return self._tag_name_by_id.get(normalized_tag_id)
 
         if not self._tags_loaded:
-            url = f"{self.base_url.rstrip('/')}/v2/tags"
-            headers = self.get_headers()
+            tags = self.get_all_version_tags()
             try:
-                tags = paginate(url, headers)
-                for tag in tags:
-                    if not isinstance(tag, dict):
-                        continue
-                    tag_key = tag.get("versionTagId") or tag.get("tagId") or tag.get("id")
-                    if not tag_key:
-                        continue
-                    self._tag_name_by_id[tag_key] = tag.get("name")
+                for tag in tags or []:
+                    self._tag_name_by_id[tag["id"]] = tag.get("name")
                 self._tags_loaded = True
             except Exception as exc:
                 print(exc)
                 return None
 
-        return self._tag_name_by_id.get(tag_id)
+        return self._tag_name_by_id.get(normalized_tag_id)
     
     def get_workbook_version_history(self,workbook_urlid):      
         url = f"{self.base_url.rstrip('/')}/v2/workbooks/{workbook_urlid}/version-history"
