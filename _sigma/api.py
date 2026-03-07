@@ -4,6 +4,9 @@ import time
 
 
 def _pick_cursor_param(url, cursor_value):
+    # /v2/workbooks/<id>/version-history behaves like page-number pagination.
+    if "/v2/workbooks/" in url and "/version-history" in url:
+        return "page"
     if "/v2.1/" in url:
         return "page"
     return "page" if cursor_value.isdigit() else "nextPage"
@@ -34,10 +37,7 @@ def paginate(url, headers, params=None, timeout=30, max_pages=1000):
                     if alt_key not in seen_cursors and fallback_key not in fallback_attempts:
                         fallback_attempts.add(fallback_key)
                         cursor_param = alternate
-                        print(
-                            f"{url} [paginate] repeated cursor on {cursor_key[0]}; "
-                            f"retrying with param={alternate}."
-                        )
+                        # Silent one-time fallback between nextPage/page to avoid noisy logs.
                         cursor_key = (cursor_param, next_cursor)
                     else:
                         print(
