@@ -1,76 +1,117 @@
-from _sigma.api import SigmaAPI
-from _api.config import load_config
 import argparse
+import csv
+import os
+from datetime import datetime
+from _api.config import load_config
+from _sigma.api import SigmaAPI
+
+
+def _version_sort_key(value):
+    if value is None:
+        return -1
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value).strip()
+    if not text:
+        return -1
+    try:
+        return int(text)
+    except ValueError:
+        try:
+            return float(text)
+        except ValueError:
+            return text
+
+
+def _latest_version(versions):
+    latest = None
+    for version in versions or []:
+        version_number = version.get("version")
+        if latest is None or _version_sort_key(version_number) > _version_sort_key(latest.get("version")):
+            latest = version
+    return latest
+
+
+def _extract_tag_names(api: SigmaAPI, latest_version: dict) -> set[str]:
+    names = set()
+    for tag in (latest_version or {}).get("tags", []) or []:
+        tag_id = tag.get("versionTagId") or tag.get("tagId") or tag.get("id")
+        tag_name = api.get_tag_name(tag_id)
+        if tag_name:
+            names.add(str(tag_name).strip())
+    return names
+
 
 def main():
-      parser = argparse.ArgumentParser(description="Sigma API Client")
-      parser.add_argument("--config", help="Path to configuration file")
-      args = parser.parse_args()
-      config = load_config(args.config)
-      base_url = config['base_url']
-      client_id = config['client_id']
-      client_secret = config['client_secret']   
-      Sigma= SigmaAPI(base_url, client_id, client_secret)
-      if Sigma.authenticate():
-            print("Authentication successful!")
-            teams = Sigma.get_all_teams()
-            if isinstance(teams, list):
-                  print(f"Total teams: {len(teams)}")
-                  for team in teams:
-                        team_name = team.get("name", "(unnamed)")
-                        team_id = team.get("teamId")
-                        print(f"Team: {team_name} (Id: {team_id})")
-            members = Sigma.get_all_members()
-            if isinstance(members, list):
-                  print(f"Total members: {len(members)}")
-                  for member in members:
-                        member_name = member.get("name", "(unnamed)")
-                        member_id = member.get("memberId")
-                        print(f"Member: {member_name} (Id: {member_id}) First Name: {member.get('firstName')} Last Name: {member.get('lastName')} Email: {member.get('email')}")
-            else:
-                  print("Failed to retrieve members.")
-            workbooks = Sigma.get_all_workbooks()
-            if isinstance(workbooks, list):
-                  print(f"Total workbooks: {len(workbooks)}")
-                  for workbook in workbooks:
-                        workbook_name = workbook.get("name", "(unnamed)")
-                        workbook_id = workbook.get("workbookId")
-                        workbook_urlid = workbook.get("workbookUrlId")
-                        if not workbook_id:
-                              print(f"Workbook: {workbook_name} (ID: missing)")
-                              continue
+    parser = argparse.ArgumentParser(description="Sigma workbook latest-version tag report")
+    parser.add_argument("--config", help="Path to configuration file")
+    parser.add_argument(
+        "--output-csv",
+        default="results/Sigma_Workbook_LatestVersion_Tags.csv",
+        help="Output CSV path.",
+    )
+    args = parser.parse_args()
 
-                        print(f"Workbook: {workbook_name} (Id: {workbook_id}, UrlId: {workbook_urlid})")
-                        tags = Sigma.get_workbook_tags(workbook_urlid) or []
-                        #print(f"Tags for workbook '{workbook_name}' (UrlId: {workbook_urlid})")
-                        versions = Sigma.get_workbook_version_history(workbook_urlid) or []
-                        #print(f"Version history for workbook '{workbook_name}' (UrlId: {workbook_urlid}):")
-                        latest_version = None
-                        for version in versions:
-                              version_number = version.get("version")
-                              published_by = version.get('publishedBy')
-                              tags = version.get("tags", [])
-                              for tag in tags:
-                                    tag_id = tag.get("versionTagId")
-                                    tagged_by = tag.get("taggedBy")
-                                    tag_name = Sigma.get_tag_name(tag_id)
-                                    print(f"Tag Id: {tag_id} ({tag_name}) (Tagged By: {tagged_by})")
-                                    
-                              if version_number is not None:
-                                    if latest_version is None or version_number > latest_version.get("version", -1):
-                                          latest_version = version
-                        if latest_version:
-                              print(f"Latest version: {latest_version.get('version')} published by {latest_version.get('publishedBy')}")
+    config = load_config(args.config)
+    sigma = SigmaAPI(config["base_url"], config["client_id"], config["client_secret"])
 
-                              
-            
-      else:
-            print("Authentication failed.")
-      
+    if not sigma.authenticate():
+        print("Authentication failed.")
+        return
 
-    
-if __name__ == "__main__":    
-     main()
+    workbooks = sigma.get_all_workbooks()
+    if not isinstance(workbooks, list):
+        print("Failed to retrieve workbooks.")
+        return
+
+    print(f"Total workbooks: {len(workbooks)}")
+    rows = []
+    for workbook in workbooks:
+        workbook_name = workbook.get("name", "(unnamed)")
+        workbook_urlid = workbook.get("workbookUrlId") or ""
+        if not workbook_urlid:
+            continue
+
+        versions = sigma.get_workbook_version_history(workbook_urlid) or []
+        latest = _latest_version(versions)
+        latest_version_number = latest.get("version") if latest else "N/A"
+        latest_tag_names = _extract_tag_names(sigma, latest)
+
+        rows.append(
+            {
+                "workbookname": workbook_name,
+                "urlid": workbook_urlid,
+                "latest_version_number": latest_version_number,
+                "INT Tag (Y/N)": "Y" if "INT" in latest_tag_names else "N",
+                "Ready for UAT Tag (Y/N)": "Y" if "Ready for UAT" in latest_tag_names else "N",
+                "UAT Tag (Y/N)": "Y" if "UAT" in latest_tag_names else "N",
+                "VP_PROD_US Tag (Y/N)": "Y" if "VP_PROD_US" in latest_tag_names else "N",
+                "VP_PROD_EU Tag (Y/N)": "Y" if "VP_PROD_EU" in latest_tag_names else "N",
+                "VP_PROD_AU Tag (Y/N)": "Y" if "VP_PROD_AU" in latest_tag_names else "N",
+                "last_updated": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+
+    os.makedirs(os.path.dirname(args.output_csv) or ".", exist_ok=True)
+    fieldnames = [
+        "workbookname",
+        "urlid",
+        "latest_version_number",
+        "INT Tag (Y/N)",
+        "Ready for UAT Tag (Y/N)",
+        "UAT Tag (Y/N)",
+        "VP_PROD_US Tag (Y/N)",
+        "VP_PROD_EU Tag (Y/N)",
+        "VP_PROD_AU Tag (Y/N)",
+        "last_updated",
+    ]
+    with open(args.output_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"Wrote {len(rows)} rows to {args.output_csv}")
 
 
-    
+if __name__ == "__main__":
+    main()
