@@ -499,13 +499,19 @@ def parse_owner_credentials(owner_str: str):
     return owner_str.strip(), None
 
 
-def process_single_job(job, base_url, logger: logging.Logger | None = None):
+def process_single_job(job, base_url, service_username, service_password, logger: logging.Logger | None = None):
     job_id = job.get('id')
     if not job_id:
         return None
 
     owner_raw = job.get('owner', '')
+    #job_owner_user = service_username
+    #job_owner_pass = service_password
+    #if "/public/Base_Reports" not in job.get('reportUnitURI', ''):
     job_owner_user, job_owner_pass = parse_owner_credentials(owner_raw)
+
+    # For public reports, use service account credentials to fetch details
+
     if not job_owner_user or not job_owner_pass:
         if logger:
             logger.warning("Skipping job %s: owner credentials missing/invalid. owner='%s'", job_id, owner_raw)
@@ -631,7 +637,7 @@ def main():
     worker_count = max(1, args.workers)
     logger.info("Processing jobs with %s workers.", worker_count)
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [executor.submit(process_single_job, job, base_url, logger) for job in job_list]
+        futures = [executor.submit(process_single_job, job, base_url, service_username, service_password, logger) for job in job_list]
         completed = 0
         total = len(futures)
         for future in as_completed(futures):

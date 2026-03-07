@@ -1,0 +1,16 @@
+venv/
+results/
+logs/
+__pycache__/
+certs/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*.bak
+*.tmp
+*.log
