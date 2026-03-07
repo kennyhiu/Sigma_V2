@@ -1,0 +1,28 @@
+jobId,reportUnitURI,paramId,reportSelectedValues,jobSelectedValues,different
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,LoggedInUsername,phil.beam@nissan-usa.com,phil.beam@nissan-usa.com,NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,Opr_Ext_ID_1,Zone 1 - Carthon Dodson,Zone 1 - Carthon Dodson,NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,Severity_1,"0 - LOW,1 - MODERATE,2 - MEDIUM","0 - LOW,1 - MODERATE,2 - MEDIUM",NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,Vehicle_1,Zone 1,Zone 1,NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,dtFromDateTime,,,NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,dtToDateTime,,,NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,lPeriodNumber,,,NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,lReportPeriodCode,9,9,NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,lTopicID,5168,5168,NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,szAdvancedOptions,,,NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,szDataOptions,,,NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,szGroups,51,51,NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,szSeverity,,,NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,szShifts,,,NO
+1267220968,/Shared_Reports/NS_Zone_1_Impact_Detail_Med_High_Severe_Last_week_report,xmlParams,,,NO
+1862755165,/public/Base_Reports/Impact/Impact_Detail_by_Operator_report,LoggedInUsername,davidjohnson@berryglobal.com,davidjohnson@berryglobal.com,NO
+1862755165,/public/Base_Reports/Impact/Impact_Detail_by_Operator_report,dtFromDateTime,,,NO
+1862755165,/public/Base_Reports/Impact/Impact_Detail_by_Operator_report,dtToDateTime,,,NO
+1862755165,/public/Base_Reports/Impact/Impact_Detail_by_Operator_report,lPeriodNumber,,,NO
+1862755165,/public/Base_Reports/Impact/Impact_Detail_by_Operator_report,lReportPeriodCode,2,2,NO
+1862755165,/public/Base_Reports/Impact/Impact_Detail_by_Operator_report,lTopicID,5168,5168,NO
+1862755165,/public/Base_Reports/Impact/Impact_Detail_by_Operator_report,szAdvancedOptions,,,NO
+1862755165,/public/Base_Reports/Impact/Impact_Detail_by_Operator_report,szDataOptions,,,NO
+1862755165,/public/Base_Reports/Impact/Impact_Detail_by_Operator_report,szGroups,,,NO
+1862755165,/public/Base_Reports/Impact/Impact_Detail_by_Operator_report,szSeverity,,,NO
+1862755165,/public/Base_Reports/Impact/Impact_Detail_by_Operator_report,szShifts,,,NO
+1862755165,/public/Base_Reports/Impact/Impact_Detail_by_Operator_report,xmlParams,,,NO
