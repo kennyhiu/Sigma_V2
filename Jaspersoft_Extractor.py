@@ -1,5 +1,4 @@
 import configparser
-import time
 import requests
 from requests.auth import HTTPBasicAuth
 from urllib.parse import quote
@@ -9,6 +8,7 @@ import json
 import csv
 import os
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from _api.logging_setup import setup_logging
 
@@ -20,6 +20,12 @@ from _api.logging_setup import setup_logging
 def parse_args():
     parser = argparse.ArgumentParser(description='Extract scheduled jobs from Jaspersoft Server.')
     parser.add_argument('config', help='Path to the config file (e.g., config.ini)')
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=8,
+        help='Concurrent workers for per-job extraction (default: 8).',
+    )
     return parser.parse_args()
 
 
@@ -493,6 +499,96 @@ def parse_owner_credentials(owner_str: str):
     return owner_str.strip(), None
 
 
+def process_single_job(job, base_url, logger: logging.Logger | None = None):
+    job_id = job.get('id')
+    if not job_id:
+        return None
+
+    owner_raw = job.get('owner', '')
+    job_owner_user, job_owner_pass = parse_owner_credentials(owner_raw)
+    if not job_owner_user or not job_owner_pass:
+        if logger:
+            logger.warning("Skipping job %s: owner credentials missing/invalid. owner='%s'", job_id, owner_raw)
+        return None
+
+    if logger:
+        logger.info("Processing job ID: %s", job_id)
+
+    job_details_url = f"{base_url}/rest_v2/jobs/{job_id}"
+    job_details = get_response(job_details_url, job_owner_user, job_owner_pass, logger=logger)
+    if not (isinstance(job_details, dict) and "error" not in job_details):
+        if logger:
+            logger.warning("Skipping job %s due to error.", job_id)
+        return None
+
+    report_unit_uri = job_details.get('source', {}).get('reportUnitURI')
+    if logger:
+        logger.info("job=%s report_unit_uri=%s", job_id, report_unit_uri)
+
+    # Job details CSV (flattened)
+    job_copy = job.copy()
+    job_copy.update(job_details)
+    job_details_row = flatten_json(job_copy)
+
+    # Job parameter values (job saved state)
+    parameter_values = (
+        job_details.get("source", {})
+        .get("parameters", {})
+        .get("parameterValues", {})
+    )
+    job_param_rows = extract_parameter_rows(job_id, report_unit_uri, parameter_values)
+    job_selected_map = extract_job_selected_map(parameter_values)
+
+    # Report selected/default state (what report shows with no overrides)
+    state_list = get_report_input_control_states(
+        base_url,
+        report_unit_uri,
+        job_owner_user,
+        job_owner_pass,
+        fresh_data=False,
+        logger=logger,
+    ) if report_unit_uri else None
+    report_selected_map = report_states_to_selected_map(state_list)
+
+    # Compare job vs report (normalized)
+    job_vs_report_rows = []
+    diff_rows = compare_job_to_report_selected(job_selected_map, report_selected_map)
+    for dr in diff_rows:
+        job_vs_report_rows.append({
+            "jobId": job_id,
+            "reportUnitURI": report_unit_uri or "",
+            "paramId": dr["paramId"],
+            "reportSelectedValues": dr["reportSelectedValues"],
+            "jobSelectedValues": dr["jobSelectedValues"],
+            "different": dr["different"]
+        })
+
+    # Optional: report input control definitions (structure)
+    report_ic_rows = []
+    input_controls = get_input_controls(
+        base_url, report_unit_uri, job_owner_user, job_owner_pass, logger=logger
+    )
+    if isinstance(input_controls, list):
+        for ic in input_controls:
+            report_ic_rows.append({
+                "reportUnitURI": report_unit_uri or "",
+                "controlId": ic.get("id", ""),
+                "controlLabel": ic.get("label", ""),
+                "controlType": ic.get("type", ""),
+                "mandatory": ic.get("mandatory", ""),
+                "readOnly": ic.get("readOnly", ""),
+                "visible": ic.get("visible", ""),
+                "controlDefinitionJson": json.dumps(ic)
+            })
+
+    return {
+        "job_details_row": job_details_row,
+        "job_param_rows": job_param_rows,
+        "job_vs_report_rows": job_vs_report_rows,
+        "report_ic_rows": report_ic_rows,
+    }
+
+
 # ---------------------------
 # Main
 # ---------------------------
@@ -532,91 +628,23 @@ def main():
     job_vs_report_rows = []
     report_ic_rows = []  # optional report input control definitions
 
-    # Cache report selected/default states per report URI
-    report_state_cache = {}  # reportUnitURI -> selected_map(dict)
-
-    # Process jobs (change [:2] to job_list when ready)
-    for job in job_list:
-        job_id = job.get('id')
-        if not job_id:
-            continue
-
-        owner_raw = job.get('owner', '')
-        job_owner_user, job_owner_pass = parse_owner_credentials(owner_raw)
-        if not job_owner_user or not job_owner_pass:
-            logger.warning("Skipping job %s: owner credentials missing/invalid. owner='%s'", job_id, owner_raw)
-            continue
-
-        logger.info("Processing job ID: %s", job_id)
-        job_details_url = f"{base_url}/rest_v2/jobs/{job_id}"
-        job_details = get_response(job_details_url, job_owner_user, job_owner_pass, logger=logger)
-
-        if not (isinstance(job_details, dict) and "error" not in job_details):
-            logger.warning("Skipping job %s due to error.", job_id)
-            continue
-
-        report_unit_uri = job_details.get('source', {}).get('reportUnitURI')
-        logger.info("job=%s report_unit_uri=%s", job_id, report_unit_uri)
-
-        # Job details CSV (flattened)
-        job_copy = job.copy()
-        job_copy.update(job_details)
-        job_details_rows.append(flatten_json(job_copy))
-
-        # Job parameter values (job saved state)
-        parameter_values = (
-            job_details.get("source", {})
-                       .get("parameters", {})
-                       .get("parameterValues", {})
-        )
-
-        job_param_rows.extend(extract_parameter_rows(job_id, report_unit_uri, parameter_values))
-        job_selected_map = extract_job_selected_map(parameter_values)
-
-        # Report selected/default state (what report shows with no overrides)
-        if report_unit_uri and report_unit_uri not in report_state_cache:
-            state_list = get_report_input_control_states(
-                base_url,
-                report_unit_uri,
-                job_owner_user,
-                job_owner_pass,
-                fresh_data=False,
-                logger=logger,
-            )
-            report_state_cache[report_unit_uri] = report_states_to_selected_map(state_list)
-
-        report_selected_map = report_state_cache.get(report_unit_uri, {}) if report_unit_uri else {}
-
-        # Compare job vs report (normalized)
-        diff_rows = compare_job_to_report_selected(job_selected_map, report_selected_map)
-        for dr in diff_rows:
-            job_vs_report_rows.append({
-                "jobId": job_id,
-                "reportUnitURI": report_unit_uri or "",
-                "paramId": dr["paramId"],
-                "reportSelectedValues": dr["reportSelectedValues"],
-                "jobSelectedValues": dr["jobSelectedValues"],
-                "different": dr["different"]
-            })
-
-        # Optional: report input control definitions (structure)
-        input_controls = get_input_controls(
-            base_url, report_unit_uri, job_owner_user, job_owner_pass, logger=logger
-        )
-        if isinstance(input_controls, list):
-            for ic in input_controls:
-                report_ic_rows.append({
-                    "reportUnitURI": report_unit_uri or "",
-                    "controlId": ic.get("id", ""),
-                    "controlLabel": ic.get("label", ""),
-                    "controlType": ic.get("type", ""),
-                    "mandatory": ic.get("mandatory", ""),
-                    "readOnly": ic.get("readOnly", ""),
-                    "visible": ic.get("visible", ""),
-                    "controlDefinitionJson": json.dumps(ic)
-                })
-
-        time.sleep(0.1)
+    worker_count = max(1, args.workers)
+    logger.info("Processing jobs with %s workers.", worker_count)
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(process_single_job, job, base_url, logger) for job in job_list]
+        completed = 0
+        total = len(futures)
+        for future in as_completed(futures):
+            completed += 1
+            result = future.result()
+            if not result:
+                continue
+            job_details_rows.append(result["job_details_row"])
+            job_param_rows.extend(result["job_param_rows"])
+            job_vs_report_rows.extend(result["job_vs_report_rows"])
+            report_ic_rows.extend(result["report_ic_rows"])
+            if completed % 100 == 0 or completed == total:
+                logger.info("Completed %s/%s jobs.", completed, total)
 
     # Write outputs
     write_csv('VP_PROD_US_Scheduled_Job_Details.csv', job_details_rows, logger=logger)
