@@ -18,13 +18,25 @@ from _api.logging_setup import setup_logging
 # ---------------------------
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Extract scheduled jobs from Jaspersoft Server.')
+    parser = argparse.ArgumentParser(description='Extract Jaspersoft jobs or reports.')
     parser.add_argument('config', help='Path to the config file (e.g., config.ini)')
+    parser.add_argument(
+        '--extract',
+        choices=['jobs', 'reports'],
+        default='jobs',
+        help='Extraction target: jobs or reports (default: jobs).',
+    )
     parser.add_argument(
         '--workers',
         type=int,
         default=8,
         help='Concurrent workers for per-job extraction (default: 8).',
+    )
+    parser.add_argument(
+        '--report-page-limit',
+        type=int,
+        default=100,
+        help='Page size for report listing pagination via /rest_v2/resources (default: 100).',
     )
     return parser.parse_args()
 
@@ -140,6 +152,151 @@ def write_csv_fixed_fieldnames(filename, rows, fieldnames, logger: logging.Logge
         logger.info("Exported to %s", output_path)
     else:
         print(f"Exported to {output_path}")
+
+# ---------------------------
+# Jaspersoft: reports
+# ---------------------------
+def extract_reports(reports_response):
+    report_list = []
+    if isinstance(reports_response, dict):
+        for key in ['reportsummary', 'reportSummaryList', 'reports', 'value']:
+            if key in reports_response and isinstance(reports_response[key], list):
+                report_list = reports_response[key]
+                break
+    elif isinstance(reports_response, list):
+        report_list = reports_response
+    return report_list
+
+
+def extract_report_resources(resources_response):
+    """
+    Extract report-unit rows from the repository resources endpoint.
+    Expected common shapes:
+      - {"resourceLookup": [...]}
+      - {"resourceLookupList": {"resourceLookup": [...]}}
+      - {"resources": [...]}
+      - [...]
+    """
+    rows = []
+    if isinstance(resources_response, list):
+        rows = resources_response
+    elif isinstance(resources_response, dict):
+        if isinstance(resources_response.get("resourceLookup"), list):
+            rows = resources_response.get("resourceLookup") or []
+        elif isinstance(resources_response.get("resources"), list):
+            rows = resources_response.get("resources") or []
+        elif isinstance(resources_response.get("value"), list):
+            rows = resources_response.get("value") or []
+        elif isinstance(resources_response.get("resourceLookupList"), dict):
+            nested = resources_response.get("resourceLookupList") or {}
+            if isinstance(nested.get("resourceLookup"), list):
+                rows = nested.get("resourceLookup") or []
+
+    # Keep only reportUnit entries when type is present.
+    filtered = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        resource_type = str(row.get("resourceType") or row.get("type") or "").strip()
+        if resource_type and resource_type != "reportUnit":
+            continue
+        filtered.append(row)
+    return filtered
+
+
+def get_all_report_resources(
+    base_url: str,
+    username: str,
+    password: str,
+    page_limit: int = 100,
+    logger: logging.Logger | None = None,
+):
+    """
+    Fetch all reportUnit resources using /rest_v2/resources pagination.
+    Iterates with offset/limit and follows Next-Offset response header.
+    """
+    url = f"{base_url}/rest_v2/resources"
+    offset = 0
+    page = 0
+    limit = max(1, int(page_limit))
+    seen_offsets = set()
+    seen_keys = set()
+    all_reports = []
+
+    while True:
+        page += 1
+        params = {
+            "type": "reportUnit",
+            "recursive": "true",
+            "offset": str(offset),
+            "limit": str(limit),
+            "forceFullPage": "true",
+        }
+        resp = requests.get(
+            url,
+            auth=HTTPBasicAuth(username, password),
+            headers={"Accept": "application/json"},
+            params=params,
+        )
+
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = resp.text
+
+        if resp.status_code != 200:
+            snippet = (resp.text or "").strip()[:500]
+            if logger:
+                logger.warning(
+                    "Failed reports page fetch offset=%s status=%s body=%s",
+                    offset,
+                    resp.status_code,
+                    snippet,
+                )
+            break
+
+        rows = extract_report_resources(payload)
+        added = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = row.get("uri") or row.get("resourceUri") or json.dumps(row, sort_keys=True)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            all_reports.append(row)
+            added += 1
+
+        next_offset_raw = resp.headers.get("Next-Offset")
+        if logger:
+            logger.info(
+                "Reports page=%s offset=%s fetched=%s added=%s next_offset=%s",
+                page,
+                offset,
+                len(rows),
+                added,
+                next_offset_raw or "-",
+            )
+
+        if not next_offset_raw:
+            break
+
+        try:
+            next_offset = int(next_offset_raw)
+        except ValueError:
+            if logger:
+                logger.warning("Invalid Next-Offset value: %s", next_offset_raw)
+            break
+
+        if next_offset in seen_offsets:
+            if logger:
+                logger.warning("Repeated Next-Offset detected (%s). Stopping.", next_offset)
+            break
+
+        seen_offsets.add(next_offset)
+        offset = next_offset
+
+    return all_reports
 
 
 # ---------------------------
@@ -595,20 +752,42 @@ def process_single_job(job, base_url, service_username, service_password, logger
     }
 
 
-# ---------------------------
-# Main
-# ---------------------------
+def run_reports_extraction(
+    base_url: str,
+    service_username: str,
+    service_password: str,
+    report_page_limit: int,
+    logger: logging.Logger | None = None,
+) -> None:
+    report_list = get_all_report_resources(
+        base_url,
+        service_username,
+        service_password,
+        page_limit=report_page_limit,
+        logger=logger,
+    )
 
-def main():
-    logger = setup_logging("logs")
-    args = parse_args()
-    cfg = read_config(args.config, logger=logger)
-    logger.info("Starting Jaspersoft extractor with config: %s", args.config)
+    if not report_list:
+        if logger:
+            logger.info("No reports found.")
+        else:
+            print("No reports found.")
+        return
 
-    base_url = cfg['JASPERSOFT']['base_url']
-    service_username = cfg['JASPERSOFT']['username']
-    service_password = cfg['JASPERSOFT']['password']
+    if logger:
+        logger.info("%s total reports found.", len(report_list))
+        logger.info("Sample reports:\n%s", json.dumps(report_list[:2], indent=2))
 
+    write_csv("VP_PROD_US_Report_List.csv", report_list, logger=logger)
+
+
+def run_jobs_extraction(
+    base_url: str,
+    service_username: str,
+    service_password: str,
+    workers: int,
+    logger: logging.Logger | None = None,
+) -> None:
     jobs_url = f"{base_url}/rest_v2/jobs"
 
     # Fetch jobs using service account
@@ -616,11 +795,13 @@ def main():
     job_list = extract_jobs(jobs_response)
 
     if not job_list:
-        logger.info("No jobs found.")
-        sys.exit(0)
+        if logger:
+            logger.info("No jobs found.")
+        return
 
-    logger.info("%s total jobs found.", len(job_list))
-    logger.info("Sample jobs:\n%s", json.dumps(job_list[:2], indent=2))
+    if logger:
+        logger.info("%s total jobs found.", len(job_list))
+        logger.info("Sample jobs:\n%s", json.dumps(job_list[:2], indent=2))
 
     # Flatten state for summary CSV
     for job in job_list:
@@ -634,8 +815,9 @@ def main():
     job_vs_report_rows = []
     report_ic_rows = []  # optional report input control definitions
 
-    worker_count = max(1, args.workers)
-    logger.info("Processing jobs with %s workers.", worker_count)
+    worker_count = max(1, workers)
+    if logger:
+        logger.info("Processing jobs with %s workers.", worker_count)
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = [executor.submit(process_single_job, job, base_url, service_username, service_password, logger) for job in job_list]
         completed = 0
@@ -649,7 +831,7 @@ def main():
             job_param_rows.extend(result["job_param_rows"])
             job_vs_report_rows.extend(result["job_vs_report_rows"])
             report_ic_rows.extend(result["report_ic_rows"])
-            if completed % 100 == 0 or completed == total:
+            if logger and (completed % 100 == 0 or completed == total):
                 logger.info("Completed %s/%s jobs.", completed, total)
 
     # Write outputs
@@ -684,6 +866,38 @@ def main():
         ],
         logger=logger,
     )
+
+
+# ---------------------------
+# Main
+# ---------------------------
+
+def main():
+    logger = setup_logging("logs")
+    args = parse_args()
+    cfg = read_config(args.config, logger=logger)
+    logger.info("Starting Jaspersoft extractor with config: %s", args.config)
+
+    base_url = cfg['JASPERSOFT']['base_url']
+    service_username = cfg['JASPERSOFT']['username']
+    service_password = cfg['JASPERSOFT']['password']
+
+    if args.extract == "reports":
+        run_reports_extraction(
+            base_url,
+            service_username,
+            service_password,
+            report_page_limit=args.report_page_limit,
+            logger=logger,
+        )
+    else:
+        run_jobs_extraction(
+            base_url,
+            service_username,
+            service_password,
+            workers=args.workers,
+            logger=logger,
+        )
 
     logger.info("Jaspersoft extraction completed.")
 
