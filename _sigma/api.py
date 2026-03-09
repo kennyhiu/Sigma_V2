@@ -125,7 +125,7 @@ def paginate(url, headers, params=None, timeout=30, max_pages=1000):
 
     return results
  
-class SigmaAPI:
+class SigmaClient:
     def __init__(self, base_url, client_id, client_secret):
         # try common option names (configparser lower-cases keys by default)
         self.base_url = base_url

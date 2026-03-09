@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from _api.config import load_config
-from _sigma.api import SigmaAPI
+from _sigma.api import SigmaClient
 
 BASE_FIELDS = [
     "path",
@@ -21,7 +21,7 @@ TAIL_FIELDS = ["last_updated"]
 
 @dataclass
 class SnapshotContext:
-    sigma: SigmaAPI
+    sigma: SigmaClient
     tag_names: list[str]
     member_name_by_id: dict[str, str]
     now_iso: str
@@ -44,7 +44,7 @@ def _member_display_name(member: dict[str, Any]) -> str:
     return str(member.get("email") or "").strip()
 
 
-def _build_member_name_by_id(sigma: SigmaAPI) -> dict[str, str]:
+def _build_member_name_by_id(sigma: SigmaClient) -> dict[str, str]:
     out: dict[str, str] = {}
     members = sigma.get_all_members() or []
     for member in members:
@@ -116,7 +116,7 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    sigma = SigmaAPI(config["base_url"], config["client_id"], config["client_secret"])
+    sigma = SigmaClient(config["base_url"], config["client_id"], config["client_secret"])
     if not sigma.authenticate():
         print("Authentication failed.")
         return
