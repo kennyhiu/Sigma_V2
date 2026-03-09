@@ -1,36 +1,33 @@
 import argparse
 import csv
 import os
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from _api.config import load_config
 from _sigma.api import SigmaAPI
 
-BASE_FIELDS = ["workspace_name", "owner_name", "workbookname", "urlid", "published", "published_date"]
+BASE_FIELDS = [
+    "path",
+    "owner_name",
+    "workbookname",
+    "urlid",
+    "published",
+    "published_date",
+]
 TAIL_FIELDS = ["last_updated"]
 
 
-def _build_row(
-    workbook: dict[str, Any],
-    sigma: SigmaAPI,
-) -> dict[str, Any] | None:
-    now_iso = datetime.now().isoformat(timespec="seconds")
-    name = workbook.get("name")
-    latest_version = workbook.get("latestVersion")
-    urlid = workbook.get("workbookUrlId")
-    tags = workbook.get("tags", [])
-    
-    row = {
-        "workbookname": name,
-        "urlid": urlid,
-        "published": latest_version,
-        "tag_version": [tag.get("sourceWorkbookVersion") for tag in tags],
-        "tagged_date": [tag.get("workbookTaggedAt") for tag in tags],
-        "last_updated": now_iso,
-    }
+@dataclass
+class SnapshotContext:
+    sigma: SigmaAPI
+    tag_names: list[str]
+    member_name_by_id: dict[str, str]
+    now_iso: str
 
-def _fieldnames(tag_names: list[str]) -> list[str]:
+
+def _build_dynamic_fieldnames(tag_names: list[str]) -> list[str]:
     tag_fields: list[str] = []
     for tag_name in tag_names:
         tag_fields.append(tag_name)
@@ -38,16 +35,78 @@ def _fieldnames(tag_names: list[str]) -> list[str]:
     return BASE_FIELDS + tag_fields + TAIL_FIELDS
 
 
-def _write_csv(path: str, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+def _member_display_name(member: dict[str, Any]) -> str:
+    first_name = str(member.get("firstName") or "").strip()
+    last_name = str(member.get("lastName") or "").strip()
+    full_name = f"{first_name} {last_name}".strip()
+    if full_name:
+        return full_name
+    return str(member.get("email") or "").strip()
+
+
+def _build_member_name_by_id(sigma: SigmaAPI) -> dict[str, str]:
+    out: dict[str, str] = {}
+    members = sigma.get_all_members() or []
+    for member in members:
+        if not isinstance(member, dict):
+            continue
+        member_id = member.get("memberId")
+        if not member_id:
+            continue
+        out[str(member_id)] = _member_display_name(member)
+    return out
+
+
+def _resolve_owner_name(workbook: dict[str, Any], ctx: SnapshotContext) -> str:
+    owner_id = workbook.get("ownerId")
+    if owner_id is None:
+        return ""
+    return ctx.member_name_by_id.get(str(owner_id), "")
+
+
+def _build_row(workbook: dict[str, Any], ctx: SnapshotContext) -> dict[str, Any] | None:
+    urlid = workbook.get("workbookUrlId")
+    if not urlid:
+        return None
+
+    row: dict[str, Any] = {
+        "path": workbook.get("path", ""),
+        "owner_name": _resolve_owner_name(workbook, ctx),
+        "workbookname": workbook.get("name", ""),
+        "urlid": urlid,
+        "published": workbook.get("latestVersion", 0) or 0,
+        "published_date": workbook.get("updatedAt", "") or "",
+        "last_updated": ctx.now_iso,
+    }
+
+    for tag_name in ctx.tag_names:
+        row[tag_name] = 0
+        row[f"{tag_name} tagged_date"] = ""
+
+    workbook_tags = ctx.sigma.get_workbook_tags(urlid) or []
+    for tag in workbook_tags:
+        if not isinstance(tag, dict):
+            continue
+        tag_name = str(tag.get("name") or "").strip()
+        if tag_name not in ctx.tag_names:
+            continue
+        source_version = tag.get("sourceWorkbookVersion")
+        row[tag_name] = source_version if source_version not in (None, "") else 0
+        row[f"{tag_name} tagged_date"] = tag.get("workbookTaggedAt") or ""
+
+    return row
+
+
+def export_rows_to_csv(path: str, fieldnames: list[str], rows: list[dict[str, Any]]) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Sigma workbook latest-version tag report")
+    parser = argparse.ArgumentParser(description="Sigma workbook version snapshot")
     parser.add_argument("--config", help="Path to configuration file")
     parser.add_argument(
         "--output-csv",
@@ -58,7 +117,6 @@ def main() -> None:
 
     config = load_config(args.config)
     sigma = SigmaAPI(config["base_url"], config["client_id"], config["client_secret"])
-
     if not sigma.authenticate():
         print("Authentication failed.")
         return
@@ -68,16 +126,29 @@ def main() -> None:
         print("Failed to retrieve workbooks.")
         return
 
-    print(f"Total workbooks: {len(workbooks)}")
-    
+    version_tags = sigma.get_all_tags() or []
+    tag_names = sorted(
+        {
+            str(tag.get("name")).strip()
+            for tag in version_tags
+            if isinstance(tag, dict) and str(tag.get("name") or "").strip()
+        }
+    )
+    ctx = SnapshotContext(
+        sigma=sigma,
+        tag_names=tag_names,
+        member_name_by_id=_build_member_name_by_id(sigma),
+        now_iso=datetime.now().isoformat(timespec="seconds"),
+    )
+
     rows: list[dict[str, Any]] = []
     for workbook in workbooks:
-        row = _build_row(workbook, sigma)
-        if row:
-            rows.append(row)
+        if not workbook.get("isArchived"):    
+            row = _build_row(workbook, ctx)
+            if row:
+                rows.append(row)
 
-    _write_csv(args.output_csv, rows, _fieldnames(tag_names))
-    
+    export_rows_to_csv(args.output_csv, _build_dynamic_fieldnames(tag_names), rows)
     print(f"Wrote {len(rows)} rows to {args.output_csv}")
 
 

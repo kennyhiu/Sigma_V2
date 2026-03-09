@@ -38,6 +38,12 @@ def parse_args():
         default=100,
         help='Page size for report listing pagination via /rest_v2/resources (default: 100).',
     )
+    parser.add_argument(
+        '--timeout',
+        type=float,
+        default=60.0,
+        help='HTTP timeout in seconds for API calls (default: 60).',
+    )
     return parser.parse_args()
 
 
@@ -57,12 +63,20 @@ def read_config(config_path, logger=None):
 # HTTP helpers
 # ---------------------------
 
-def get_response(url, username, password, params=None, logger: logging.Logger | None = None):
+def get_response(
+    url,
+    username,
+    password,
+    params=None,
+    timeout: float = 60.0,
+    logger: logging.Logger | None = None,
+):
     r = requests.get(
         url,
         auth=HTTPBasicAuth(username, password),
         headers={'Accept': 'application/json'},
-        params=params or None
+        params=params or None,
+        timeout=timeout,
     )
     try:
         payload = r.json()
@@ -209,6 +223,7 @@ def get_all_report_resources(
     username: str,
     password: str,
     page_limit: int = 100,
+    timeout: float = 60.0,
     logger: logging.Logger | None = None,
 ):
     """
@@ -237,6 +252,7 @@ def get_all_report_resources(
             auth=HTTPBasicAuth(username, password),
             headers={"Accept": "application/json"},
             params=params,
+            timeout=timeout,
         )
 
         try:
@@ -327,13 +343,20 @@ def flatten_state(job):
 # Jaspersoft: report input controls (definition + values)
 # ---------------------------
 
-def get_input_controls(base_url, report_unit_uri, username, password, logger: logging.Logger | None = None):
+def get_input_controls(
+    base_url,
+    report_unit_uri,
+    username,
+    password,
+    timeout: float = 60.0,
+    logger: logging.Logger | None = None,
+):
     if not report_unit_uri:
         return None
 
     encoded_uri = quote(report_unit_uri, safe='/')
     url = f"{base_url}/rest_v2/reports{encoded_uri}/inputControls"
-    resp = get_response(url, username, password, logger=logger)
+    resp = get_response(url, username, password, timeout=timeout, logger=logger)
 
     if isinstance(resp, list):
         return resp
@@ -358,6 +381,7 @@ def get_report_input_control_states(
     username,
     password,
     fresh_data=False,
+    timeout: float = 60.0,
     logger: logging.Logger | None = None,
 ):
     """
@@ -370,7 +394,7 @@ def get_report_input_control_states(
     encoded_uri = quote(report_unit_uri, safe='/')
     url = f"{base_url}/rest_v2/reports{encoded_uri}/inputControls/values"
     params = {"freshData": "true"} if fresh_data else None
-    resp = get_response(url, username, password, params=params, logger=logger)
+    resp = get_response(url, username, password, params=params, timeout=timeout, logger=logger)
 
     # Expected JSON shape per many installs:
     # {"inputControlState":[{id, options[], value, uri}, ...]}
@@ -656,7 +680,14 @@ def parse_owner_credentials(owner_str: str):
     return owner_str.strip(), None
 
 
-def process_single_job(job, base_url, service_username, service_password, logger: logging.Logger | None = None):
+def process_single_job(
+    job,
+    base_url,
+    service_username,
+    service_password,
+    timeout: float,
+    logger: logging.Logger | None = None,
+):
     job_id = job.get('id')
     if not job_id:
         return None
@@ -678,7 +709,7 @@ def process_single_job(job, base_url, service_username, service_password, logger
         logger.info("Processing job ID: %s", job_id)
 
     job_details_url = f"{base_url}/rest_v2/jobs/{job_id}"
-    job_details = get_response(job_details_url, job_owner_user, job_owner_pass, logger=logger)
+    job_details = get_response(job_details_url, job_owner_user, job_owner_pass, timeout=timeout, logger=logger)
     if not (isinstance(job_details, dict) and "error" not in job_details):
         if logger:
             logger.warning("Skipping job %s due to error.", job_id)
@@ -709,6 +740,7 @@ def process_single_job(job, base_url, service_username, service_password, logger
         job_owner_user,
         job_owner_pass,
         fresh_data=False,
+        timeout=timeout,
         logger=logger,
     ) if report_unit_uri else None
     report_selected_map = report_states_to_selected_map(state_list)
@@ -729,7 +761,7 @@ def process_single_job(job, base_url, service_username, service_password, logger
     # Optional: report input control definitions (structure)
     report_ic_rows = []
     input_controls = get_input_controls(
-        base_url, report_unit_uri, job_owner_user, job_owner_pass, logger=logger
+        base_url, report_unit_uri, job_owner_user, job_owner_pass, timeout=timeout, logger=logger
     )
     if isinstance(input_controls, list):
         for ic in input_controls:
@@ -757,6 +789,7 @@ def run_reports_extraction(
     service_username: str,
     service_password: str,
     report_page_limit: int,
+    timeout: float,
     logger: logging.Logger | None = None,
 ) -> None:
     report_list = get_all_report_resources(
@@ -764,6 +797,7 @@ def run_reports_extraction(
         service_username,
         service_password,
         page_limit=report_page_limit,
+        timeout=timeout,
         logger=logger,
     )
 
@@ -786,12 +820,13 @@ def run_jobs_extraction(
     service_username: str,
     service_password: str,
     workers: int,
+    timeout: float,
     logger: logging.Logger | None = None,
 ) -> None:
     jobs_url = f"{base_url}/rest_v2/jobs"
 
     # Fetch jobs using service account
-    jobs_response = get_response(jobs_url, service_username, service_password, logger=logger)
+    jobs_response = get_response(jobs_url, service_username, service_password, timeout=timeout, logger=logger)
     job_list = extract_jobs(jobs_response)
 
     if not job_list:
@@ -819,7 +854,18 @@ def run_jobs_extraction(
     if logger:
         logger.info("Processing jobs with %s workers.", worker_count)
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [executor.submit(process_single_job, job, base_url, service_username, service_password, logger) for job in job_list]
+        futures = [
+            executor.submit(
+                process_single_job,
+                job,
+                base_url,
+                service_username,
+                service_password,
+                timeout,
+                logger,
+            )
+            for job in job_list
+        ]
         completed = 0
         total = len(futures)
         for future in as_completed(futures):
@@ -888,6 +934,7 @@ def main():
             service_username,
             service_password,
             report_page_limit=args.report_page_limit,
+            timeout=args.timeout,
             logger=logger,
         )
     else:
@@ -896,6 +943,7 @@ def main():
             service_username,
             service_password,
             workers=args.workers,
+            timeout=args.timeout,
             logger=logger,
         )
 

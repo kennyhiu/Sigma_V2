@@ -224,16 +224,18 @@ class SigmaAPI:
             print(exc)
             return None
 
-    def get_all_version_tags(self):
+    def get_all_tags(self):
         url = f"{self.base_url.rstrip('/')}/v2/tags"
         headers = self.get_headers()
         try:
             tags = paginate(url, headers)
             normalized = []
             for tag in tags:
+                if tag.get("isArchived") == True:
+                    continue
                 if not isinstance(tag, dict):
                     continue
-                tag_id = tag.get("versionTagId") or tag.get("tagId") or tag.get("id")
+                tag_id = tag.get("versionTagId")
                 if not tag_id:
                     continue
                 normalized.append(
@@ -246,26 +248,7 @@ class SigmaAPI:
         except Exception as exc:
             print(exc)
             return None
-    
-    def get_tag_name(self, tag_id):
-        if not tag_id:
-            return None
-        normalized_tag_id = str(tag_id)
-        if normalized_tag_id in self._tag_name_by_id:
-            return self._tag_name_by_id.get(normalized_tag_id)
-
-        if not self._tags_loaded:
-            tags = self.get_all_version_tags()
-            try:
-                for tag in tags or []:
-                    self._tag_name_by_id[tag["id"]] = tag.get("name")
-                self._tags_loaded = True
-            except Exception as exc:
-                print(exc)
-                return None
-
-        return self._tag_name_by_id.get(normalized_tag_id)
-    
+        
     def get_workbook_version_history(self,workbook_urlid):      
         url = f"{self.base_url.rstrip('/')}/v2/workbooks/{workbook_urlid}/version-history"
         headers = self.get_headers()
