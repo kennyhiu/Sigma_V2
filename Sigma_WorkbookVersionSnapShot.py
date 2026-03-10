@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from _.config import load_config
+from _core.config import load_config
 from _sigma.api import SigmaClient
 
 FIELDNAMES = [
