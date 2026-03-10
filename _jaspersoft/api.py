@@ -1,125 +1,178 @@
 import requests
-import sys
-import time
-from urllib.parse import quote
-import base64
+from requests.auth import HTTPBasicAuth
+from typing import Dict, List, Optional
 
-def paginate(url, headers):
-    """Paginate through Jaspersoft resources using offset/limit query parameters.
-    
-    Jaspersoft uses query parameters (offset, limit) and the Next-Offset response
-    header to control pagination, not a nextPageUrl field in the JSON response.
-    """
-    results = []
-    limit = 100
-    offset = 0
-    
-    while True:
-        # add pagination params to the URL
-        separator = "&" if "?" in url else "?"
-        paginated_url = f"{url}{separator}offset={offset}&limit={limit}"
-        
-        response = requests.get(paginated_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        # handle 204 No Content or empty response
-        if response.status_code == 204 or not response.content:
-            break
-        
-        try:
-            data = response.json()
-        except ValueError:  # includes JSONDecodeError
-            # non-JSON response; stop pagination
-            break
-        
-        # Jaspersoft returns an array of resourceLookup objects directly
-        if isinstance(data, list):
-            items = data
-        else:
-            # or sometimes wrapped in an object
-            items = data.get("items", data.get("resourceLookup", []))
-        print(f"Fetched {offset}, fetching another {len(items)} items from {paginated_url}", file=sys.stderr)
-        results.extend(items)
-        
-        # check the Next-Offset header to see if there are more pages:
-        # if it's absent, we've reached the last page
-        next_offset = response.headers.get("Next-Offset")
-        if next_offset is None:
-            break
-        
-        offset = int(next_offset)
-        time.sleep(0.1)  # Be polite and avoid hitting rate limits
-    
-    return results
 
 class JaspersoftClient:
-    def __init__(self, base_url, username, password):
-        # try common option names (configparser lower-cases keys by default)
-        self.base_url = base_url
-        self.username = username
-        self.password = password
+    def __init__(
+        self,
+        base_url: str,
+        username: str,
+        password: str,
+        verify_ssl: bool = True,
+        timeout: int = 60,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.rest_url = f"{self.base_url}/rest_v2"
+        self.timeout = timeout
 
+        self.session = requests.Session()
+        self.session.auth = HTTPBasicAuth(username, password)
+        self.session.verify = verify_ssl
+        self.session.headers.update({
+            "Accept": "application/json"
+        })
 
-    def _get_header(self):
-        credentials = f"{self.username}:{self.password}"
-        headers = {
-            "Authorization": f"Basic {base64.b64encode(credentials.encode()).decode()}",
-            "Accept": "application/json",
-        }
-        return headers
-
-
-    def authenticate(self):
-        # The login endpoint expects form fields, not Basic auth headers.  If
-        # the credentials are incorrect or missing the server returns a 400.
-        auth_url = f"{self.base_url.rstrip('/')}/rest_v2/login"
-        data = {"j_username": self.username, "j_password": self.password}
+    def _raise_for_status(self, response: requests.Response) -> None:
         try:
-            response = requests.post(auth_url, data=data, timeout=10)
-            if response.status_code != 200:
-                # include body so caller can see server message (often plain text)
-                print(
-                    f"Authentication failed ({response.status_code}): {response.text}",
-                    file=sys.stderr,
-                )
             response.raise_for_status()
-            return True
-        except requests.RequestException as e:
-            print(f"Authentication error: {e}", file=sys.stderr)
-            return False
+        except requests.HTTPError as exc:
+            raise RuntimeError(
+                f"HTTP {response.status_code} error for {response.request.method} {response.url}\n"
+                f"Response: {response.text}"
+            ) from exc
 
+    def get_server_info(self) -> Dict:
+        url = f"{self.rest_url}/serverInfo"
+        response = self.session.get(url, timeout=self.timeout)
+        self._raise_for_status(response)
+        return response.json()
 
-    def get_reports(self):
-        # ensure we don't end up with a double-slash if base_url already
-        # includes a trailing slash
-        reports_url = f"{self.base_url.rstrip('/')}/rest_v2/resources"
-        try:
-            reports = paginate(reports_url, headers=self._get_header())
-            return reports
-        except requests.RequestException as e:
-            print(f"Error fetching reports: {e}", file=sys.stderr)
-            return []
+    def search_resources_page(
+        self,
+        folder_uri: str = "/",
+        resource_type: Optional[str] = None,
+        recursive: bool = True,
+        limit: int = 100,
+        offset: int = 0,
+        expanded: bool = False,
+        show_hidden_items: bool = False,
+        force_full_page: bool = True,
+    ) -> Dict:
+        """
+        Fetch one page of resources from JasperReports Server.
+        """
+        url = f"{self.rest_url}/resources"
+        params = {
+            "folderUri": folder_uri,
+            "recursive": str(recursive).lower(),
+            "limit": limit,
+            "offset": offset,
+            "expanded": str(expanded).lower(),
+            "showHiddenItems": str(show_hidden_items).lower(),
+            "forceFullPage": str(force_full_page).lower(),
+        }
 
+        if resource_type:
+            params["type"] = resource_type
 
-    def get_scheduled_jobs(self):            
-        scheduled_jobs_url = f"{self.base_url.rstrip('/')}/rest_v2/jobs"
-        try:
-            scheduled_jobs = paginate(scheduled_jobs_url, headers=self._get_header())
-            return scheduled_jobs
-        except requests.RequestException as e:
-            print(f"Error fetching scheduled jobs: {e}", file=sys.stderr)
-            return []
+        response = self.session.get(url, params=params, timeout=self.timeout)
+        self._raise_for_status(response)
 
+        data = response.json()
 
-    def get_report_details(self, report_unit_uri):
-        encoded_uri = quote(report_unit_uri, safe='/')
-        report_url = f"{self.base_url}/rest_v2{encoded_uri}"
-        try:
-            headers = self._get_header()
-            report_details = paginate(report_url, headers=headers)
-            return report_details
-        except requests.RequestException as e:
-            print(f"Error fetching report details: {e}", file=sys.stderr)
-            return None
-    
+        return {
+            "data": data,
+            "headers": dict(response.headers),
+            "status_code": response.status_code,
+            "url": response.url,
+        }
+
+    @staticmethod
+    def _extract_items(payload) -> List[Dict]:
+        """
+        Jaspersoft responses are usually a list or wrapped structure depending on endpoint/version.
+        This helper tries to normalize them.
+        """
+        if isinstance(payload, list):
+            return payload
+
+        if isinstance(payload, dict):
+            # common possible wrappers
+            for key in ("resourceLookup", "resources", "items"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+
+        return []
+
+    def get_all_reports(
+        self,
+        folder_uri: str = "/",
+        page_size: int = 100,
+        recursive: bool = True,
+        expanded: bool = False,
+        show_hidden_items: bool = False,
+        verbose: bool = True,
+        exclude_patterns: Optional[List] = None,  # list of compiled regex patterns
+    ) -> List[Dict]:
+        """
+        Progressively fetch all reportUnit resources until no more pages remain.
+        Optionally exclude reports whose URI match any of the exclude_patterns (regex).
+        """
+        if exclude_patterns is None:
+            exclude_patterns = []
+
+        all_reports: List[Dict] = []
+        offset = 0
+        page_num = 1
+
+        while True:
+            result = self.search_resources_page(
+                folder_uri=folder_uri,
+                resource_type="reportUnit",
+                recursive=recursive,
+                limit=page_size,
+                offset=offset,
+                expanded=expanded,
+                show_hidden_items=show_hidden_items,
+                force_full_page=True,
+            )
+            items = self._extract_items(result["data"])
+            headers = result["headers"]
+
+            # Filter items based on exclude patterns
+            # if patterns were compiled regexes use them, otherwise fall back to substring
+            filtered_items = []
+            for item in items:
+                uri = item.get("uri", "")
+                skip = False
+                for pattern in exclude_patterns:
+                    # Debug: print pattern and uri being matched
+                    if hasattr(pattern, "search"):
+                        match = pattern.search(uri)
+                        if match:
+                            print(f"DEBUG: Excluded by regex {pattern.pattern}: {uri}", file=__import__('sys').stderr)
+                            skip = True
+                            break
+                    else:
+                        if pattern in uri:
+                            print(f"DEBUG: Excluded by substring {pattern}: {uri}", file=__import__('sys').stderr)
+                            skip = True
+                            break
+                if not skip:
+                    filtered_items.append(item)
+
+            if verbose:
+                print(
+                    f"Page {page_num}: fetched {len(items)} reports, "
+                    f"filtered to {len(filtered_items)} "
+                    f"(offset={offset}, next_offset={headers.get('Next-Offset')})"
+                )
+
+            all_reports.extend(filtered_items)
+
+            next_offset = headers.get("Next-Offset")
+            if not next_offset:
+                break
+
+            try:
+                offset = int(next_offset)
+            except ValueError:
+                break
+
+            page_num += 1
+
+        return all_reports
+
     

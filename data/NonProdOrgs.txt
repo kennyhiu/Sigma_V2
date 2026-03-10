@@ -7,6 +7,7 @@
 '/public/adhoc/%'
 '/BadReports/%'
 '/Base_Reports__Deleted_Reports_/%'
+'/organization_1/PE_Dev%'
 '/temp/Report%'
 '/organizations/%/temp/Report%'
 '/organizations/organization_1/%'

@@ -5,9 +5,7 @@ import time
 
 def _pick_cursor_param(url, cursor_value):
     # /v2/workbooks/<id>/version-history behaves like page-number pagination.
-    if "/v2/workbooks/" in url and "/version-history" in url:
-        return "page"
-    if "/v2.1/" in url:
+    if "/v2.1/" and "/v2/workbooks/" in url and "/version-history" in url:
         return "page"
     return "page" if cursor_value.isdigit() else "nextPage"
 
